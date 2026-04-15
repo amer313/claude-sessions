@@ -139,8 +139,9 @@ for path in sorted(glob.glob(os.path.join(sessions_dir, "*.json"))):
 if active:
     with open(backup_path, "w") as f:
         json.dump(active, f, indent=2)
-elif os.path.exists(backup_path):
-    os.remove(backup_path)
+# Never delete the backup — only the restore agent consumes it.
+# This prevents the race where snapshot fires at login and nukes
+# the backup before restore can read it.
 
 print(len(active))
 PYEOF
@@ -166,13 +167,10 @@ cmd_restore() {
         sleep "$delay"
     fi
 
-    # Primary source: session files with dead PIDs
-    local sessions
-    sessions=$(read_session_files "dead")
-
-    # Fallback: backup manifest
-    if [[ -z "$sessions" && -f "$BACKUP" ]]; then
-        log "Restore: no dead-PID session files, trying backup"
+    # Primary source: backup manifest (created while sessions were alive, survives restart)
+    local sessions=""
+    if [[ -f "$BACKUP" ]]; then
+        log "Restore: reading backup manifest"
         sessions=$(/usr/bin/python3 - "$BACKUP" <<'PYEOF'
 import json, os, sys
 
@@ -185,13 +183,19 @@ for s in data:
     pid = s.get("pid", 0)
     try:
         os.kill(pid, 0)
-        continue  # alive, skip
+        continue  # alive, skip — already running
     except:
         pass
     name = s.get("name", "")
     print(f"{s['sessionId']}|{s['cwd']}|{name}|{pid}|dead")
 PYEOF
         )
+    fi
+
+    # Fallback: session files with dead PIDs (in case backup doesn't exist)
+    if [[ -z "$sessions" ]]; then
+        log "Restore: no backup or all alive, checking session files"
+        sessions=$(read_session_files "dead")
     fi
 
     if [[ -z "$sessions" ]]; then
@@ -360,8 +364,6 @@ CONF
     </array>
     <key>StartInterval</key>
     <integer>300</integer>
-    <key>RunAtLoad</key>
-    <true/>
     <key>StandardOutPath</key>
     <string>$LOG_DIR/snapshot-stdout.log</string>
     <key>StandardErrorPath</key>
