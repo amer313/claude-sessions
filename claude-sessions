@@ -938,12 +938,21 @@ PLIST
 }
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
+cmd_setup() {
+    cmd_install
+    if [[ "${1:-}" != "--no-menubar" ]]; then
+        echo ""
+        cmd_menubar install
+    fi
+}
+
 case "${1:-status}" in
     snapshot)   cmd_snapshot ;;
     restore)    cmd_restore "${2:-0}" ;;
     prune)      cmd_prune "${2:-}" ;;
     status)     cmd_status ;;
     install)    cmd_install ;;
+    setup)      cmd_setup "${2:-}" ;;
     uninstall)  cmd_uninstall ;;
     disable)    cmd_disable ;;
     enable)     cmd_enable ;;
@@ -951,6 +960,7 @@ case "${1:-status}" in
     *)
         echo "claude-sessions — Auto-resume Claude Code after Mac restart"
         echo ""
+        echo "  setup               One-command install: LaunchAgents + menu bar"
         echo "  status              Show live/dead sessions and agent status"
         echo "  restore             Resume all dead-PID sessions now"
         echo "  snapshot            Back up current session data"

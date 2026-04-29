@@ -30,14 +30,16 @@ A lightweight backup daemon (every 5 min) keeps a safety-net copy in case the se
 ### Homebrew (recommended)
 
 ```bash
-brew install amer313/tap/claude-sessions
+brew install amer313/tap/claude-sessions && claude-sessions setup
 ```
 
-That's it. LaunchAgents are registered and the menu bar item is up. `brew upgrade claude-sessions` pulls the latest.
+`brew upgrade claude-sessions` picks up new versions; no need to re-run `setup`.
 
-Don't want the menu bar? `HOMEBREW_CLAUDE_SESSIONS_NO_MENUBAR=1 brew install amer313/tap/claude-sessions`.
+Skip the menu bar: `claude-sessions setup --no-menubar`.
 
-### curl
+> Homebrew's `post_install` runs in a sandbox that blocks writes to `~/Library/LaunchAgents/`, so the setup step has to run from your shell. One command, one time.
+
+### curl (true one-liner)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amer313/claude-sessions/main/install.sh | bash
