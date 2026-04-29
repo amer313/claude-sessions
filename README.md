@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="claude-sessions" width="640">
+</p>
+
 # claude-sessions
 
 Auto-resume all your Claude Code sessions after a Mac restart.
@@ -29,6 +33,7 @@ chmod +x ~/.claude/session-manager/claude-sessions
 ```
 claude-sessions status              # What's running now
 claude-sessions restore             # Manually resume dead sessions
+claude-sessions prune [days]        # Remove dead session files older than N days
 claude-sessions disable             # Skip next auto-restore
 claude-sessions enable              # Re-enable auto-restore
 claude-sessions menubar install     # Add menu bar item (optional)
@@ -52,7 +57,20 @@ TERMINAL=""
 #   windows — one window per session (old behavior)
 #   tmux    — one tmux session "claude" with one window per session
 LAYOUT="tabs"
+
+# Auto-prune dead session files older than N days (snapshot daemon does this).
+# Also always prunes dead sessions whose CWD no longer exists. Set 0 to disable.
+PRUNE_DAYS=7
 ```
+
+### Auto-prune
+
+The snapshot daemon (runs every 5 min) automatically drops stale session files:
+
+- **Always**: any dead-PID session whose `cwd` no longer exists on disk
+- **By age**: dead-PID sessions older than `PRUNE_DAYS` days (default 7)
+
+This keeps `~/.claude/sessions/` and the backup manifest clean without any work on your part. For a manual pass: `claude-sessions prune [days]`.
 
 ### Layouts
 

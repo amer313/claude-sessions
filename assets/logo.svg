@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="claude-sessions">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#D97757"/>
+      <stop offset="100%" stop-color="#A44A30"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="8" y="8" width="240" height="240" rx="56" ry="56" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" ry="56"
+        fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="2"/>
+
+  <!-- Escape glyph: arrow rising above a baseline.
+       Reads as "resume / come back up". -->
+  <g stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <!-- shaft -->
+    <path d="M128 76 L128 172"/>
+    <!-- arrowhead -->
+    <path d="M88 116 L128 76 L168 116"/>
+    <!-- baseline -->
+    <path d="M76 196 L180 196"/>
+  </g>
+</svg>
