@@ -629,6 +629,34 @@ cmd_enable() {
 
 # ─── MENU BAR ────────────────────────────────────────────────────────────────
 MENUBAR_SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/amer313/claude-sessions/main/claude-sessions-menubar.py"
+MENUBAR_VENV="$MANAGER_DIR/venv"
+
+# Find a Python that can actually build rumps (needs pyobjc → >=3.10 preferred).
+# Tries common locations; falls back to `python3` on PATH.
+find_python_for_menubar() {
+    local candidates=(
+        "/opt/homebrew/bin/python3.13"
+        "/opt/homebrew/bin/python3.12"
+        "/opt/homebrew/bin/python3.11"
+        "/opt/homebrew/bin/python3"
+        "/usr/local/bin/python3.13"
+        "/usr/local/bin/python3.12"
+        "/usr/local/bin/python3.11"
+        "/usr/local/bin/python3"
+    )
+    for p in "${candidates[@]}"; do
+        [[ -x "$p" ]] && { echo "$p"; return; }
+    done
+    # Fallback: anything on PATH that isn't the system 3.9
+    if command -v python3 &>/dev/null; then
+        local ver
+        ver=$(python3 -c 'import sys; print(sys.version_info[:2])')
+        # System /usr/bin/python3 on current macOS is 3.9 — rumps/pyobjc install is flaky.
+        if [[ "$ver" != "(3, 9)" ]]; then
+            command -v python3
+        fi
+    fi
+}
 
 cmd_menubar() {
     local sub="${1:-status}"
@@ -639,24 +667,49 @@ cmd_menubar() {
             ensure_dirs
             echo "Setting up menu bar item..."
 
-            # If we already have the script alongside this one in the repo, copy it.
-            # Otherwise, download it.
-            local script_dir
+            # Copy the menubar script from alongside this one, or download it.
+            local script_dir src
             script_dir="$(cd "$(dirname "$0")" && pwd)"
-            if [[ -f "$script_dir/claude-sessions-menubar.py" ]]; then
-                cp "$script_dir/claude-sessions-menubar.py" "$menubar_py"
-            else
+            src="$script_dir/claude-sessions-menubar.py"
+            if [[ -f "$src" && "$src" != "$menubar_py" ]]; then
+                cp "$src" "$menubar_py"
+            elif [[ ! -f "$menubar_py" ]]; then
                 curl -fsSL "$MENUBAR_SCRIPT_URL_DEFAULT" -o "$menubar_py"
             fi
             chmod +x "$menubar_py"
 
-            # Ensure rumps is installed for the user
-            if ! /usr/bin/python3 -c "import rumps" 2>/dev/null; then
-                echo "Installing 'rumps' (menu bar library) to user site-packages..."
-                /usr/bin/python3 -m pip install --user --quiet rumps || {
-                    echo -e "${RED}Failed to install rumps.${NC} Try: python3 -m pip install --user rumps"
+            # Create a dedicated venv and install rumps into it.
+            # This avoids depending on /usr/bin/python3 (system 3.9, pyobjc-core
+            # yanked on 3.9) or user site-packages which has path quirks.
+            local py
+            py=$(find_python_for_menubar)
+            if [[ -z "$py" ]]; then
+                echo -e "${RED}No suitable Python 3.10+ found.${NC}"
+                echo "Install one: brew install python"
+                return 1
+            fi
+            echo "Using $py"
+
+            if [[ ! -x "$MENUBAR_VENV/bin/python" ]]; then
+                echo "Creating venv at $MENUBAR_VENV ..."
+                "$py" -m venv "$MENUBAR_VENV" || {
+                    echo -e "${RED}Failed to create venv.${NC}"
                     return 1
                 }
+            fi
+
+            echo "Installing rumps into venv ..."
+            "$MENUBAR_VENV/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1 || true
+            "$MENUBAR_VENV/bin/pip" install --quiet rumps || {
+                echo -e "${RED}Failed to install rumps.${NC}"
+                echo "Manual fix: $MENUBAR_VENV/bin/pip install rumps"
+                return 1
+            }
+
+            # Sanity check: can we import rumps?
+            if ! "$MENUBAR_VENV/bin/python" -c "import rumps" 2>/dev/null; then
+                echo -e "${RED}rumps installed but import failed.${NC}"
+                return 1
             fi
 
             mkdir -p "$LAUNCHAGENTS"
@@ -669,13 +722,15 @@ cmd_menubar() {
     <string>$MENUBAR_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>$MENUBAR_VENV/bin/python</string>
         <string>$menubar_py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>$LOG_DIR/menubar-stdout.log</string>
     <key>StandardErrorPath</key>
@@ -693,14 +748,15 @@ PLIST
 
             launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" 2>/dev/null || true
             launchctl bootstrap "gui/$(id -u)" "$LAUNCHAGENTS/$MENUBAR_LABEL.plist"
-            log "Menu bar installed"
+            log "Menu bar installed (python=$py)"
             echo -e "${GREEN}Menu bar item installed.${NC} Look for ⎋ in your menu bar."
             ;;
         uninstall)
             launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" 2>/dev/null || true
             rm -f "$LAUNCHAGENTS/$MENUBAR_LABEL.plist"
+            # Leave the venv on disk — cheap to keep, saves a reinstall later.
             log "Menu bar uninstalled"
-            echo -e "${GREEN}Menu bar item removed.${NC}"
+            echo -e "${GREEN}Menu bar item removed.${NC} (venv preserved at $MENUBAR_VENV)"
             ;;
         run)
             # Run directly in the foreground (for manual testing)
@@ -708,7 +764,12 @@ PLIST
                 echo -e "${RED}Menu bar not installed.${NC} Run: claude-sessions menubar install"
                 return 1
             fi
-            exec /usr/bin/python3 "$menubar_py"
+            if [[ -x "$MENUBAR_VENV/bin/python" ]]; then
+                exec "$MENUBAR_VENV/bin/python" "$menubar_py"
+            else
+                echo -e "${RED}Venv missing.${NC} Run: claude-sessions menubar install"
+                return 1
+            fi
             ;;
         status|*)
             if launchctl list "$MENUBAR_LABEL" &>/dev/null; then
