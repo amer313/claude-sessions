@@ -31,10 +31,11 @@ A lightweight backup daemon (every 5 min) keeps a safety-net copy in case the se
 
 ```bash
 brew install amer313/tap/claude-sessions
-claude-sessions install
 ```
 
-To upgrade later: `brew upgrade claude-sessions`.
+That's it. LaunchAgents are registered and the menu bar item is up. `brew upgrade claude-sessions` pulls the latest.
+
+Don't want the menu bar? `HOMEBREW_CLAUDE_SESSIONS_NO_MENUBAR=1 brew install amer313/tap/claude-sessions`.
 
 ### curl
 
@@ -42,14 +43,10 @@ To upgrade later: `brew upgrade claude-sessions`.
 curl -fsSL https://raw.githubusercontent.com/amer313/claude-sessions/main/install.sh | bash
 ```
 
-### Manual
+Skip the menu bar:
 
 ```bash
-mkdir -p ~/.claude/session-manager
-curl -fsSL https://raw.githubusercontent.com/amer313/claude-sessions/main/claude-sessions \
-  -o ~/.claude/session-manager/claude-sessions
-chmod +x ~/.claude/session-manager/claude-sessions
-~/.claude/session-manager/claude-sessions install
+curl -fsSL https://raw.githubusercontent.com/amer313/claude-sessions/main/install.sh | bash -s -- --no-menubar
 ```
 
 ## Usage
