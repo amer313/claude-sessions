@@ -767,6 +767,7 @@ cmd_enable() {
 
 # ─── MENU BAR ────────────────────────────────────────────────────────────────
 MENUBAR_SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/amer313/claude-sessions/main/claude-sessions-menubar.py"
+MENUBAR_ICON_URL_DEFAULT="https://raw.githubusercontent.com/amer313/claude-sessions/main/assets/menubar-icon.png"
 MENUBAR_VENV="$MANAGER_DIR/venv"
 
 # Find a Python that can actually build rumps (needs pyobjc → >=3.10 preferred).
@@ -806,7 +807,7 @@ cmd_menubar() {
             echo "Setting up menu bar item..."
 
             # Copy the menubar script from alongside this one, or download it.
-            local script_dir src
+            local script_dir src icon_src icon_dst
             script_dir="$(cd "$(dirname "$0")" && pwd)"
             src="$script_dir/claude-sessions-menubar.py"
             if [[ -f "$src" && "$src" != "$menubar_py" ]]; then
@@ -815,6 +816,23 @@ cmd_menubar() {
                 curl -fsSL "$MENUBAR_SCRIPT_URL_DEFAULT" -o "$menubar_py"
             fi
             chmod +x "$menubar_py"
+
+            # Install the menu bar icon (totem). Homebrew ships it in
+            # $(brew --prefix)/share/claude-sessions/; otherwise we look next
+            # to the script (repo checkout) or download.
+            icon_dst="$MANAGER_DIR/menubar-icon.png"
+            for candidate in \
+                "$script_dir/../share/claude-sessions/menubar-icon.png" \
+                "$script_dir/assets/menubar-icon.png" \
+                "/opt/homebrew/share/claude-sessions/menubar-icon.png" \
+                "/usr/local/share/claude-sessions/menubar-icon.png"; do
+                if [[ -f "$candidate" ]]; then icon_src="$candidate"; break; fi
+            done
+            if [[ -n "${icon_src:-}" ]]; then
+                cp "$icon_src" "$icon_dst"
+            else
+                curl -fsSL "$MENUBAR_ICON_URL_DEFAULT" -o "$icon_dst" 2>/dev/null || true
+            fi
 
             # Create a dedicated venv and install rumps into it.
             # This avoids depending on /usr/bin/python3 (system 3.9, pyobjc-core

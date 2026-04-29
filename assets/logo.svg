@@ -2,23 +2,21 @@
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#D97757"/>
-      <stop offset="100%" stop-color="#A44A30"/>
+      <stop offset="100%" stop-color="#8A3A22"/>
     </linearGradient>
   </defs>
-
-  <!-- Tile -->
   <rect x="8" y="8" width="240" height="240" rx="56" ry="56" fill="url(#bg)"/>
   <rect x="8" y="8" width="240" height="240" rx="56" ry="56"
         fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="2"/>
 
-  <!-- Escape glyph: arrow rising above a baseline.
-       Reads as "resume / come back up". -->
-  <g stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none">
-    <!-- shaft -->
-    <path d="M128 76 L128 172"/>
-    <!-- arrowhead -->
-    <path d="M88 116 L128 76 L168 116"/>
-    <!-- baseline -->
-    <path d="M76 196 L180 196"/>
-  </g>
+  <!-- Totem: four rounded blocks stacked, each slightly smaller going up.
+       Reads as sessions piled / foundation / structure. Top block has the
+       glowing eye-dot to give it a "head". -->
+  <rect x="70" y="188" width="116" height="28" rx="10" fill="#FFFFFF" opacity="0.55"/>
+  <rect x="80" y="152" width="96"  height="28" rx="10" fill="#FFFFFF" opacity="0.75"/>
+  <rect x="90" y="116" width="76"  height="28" rx="10" fill="#FFFFFF" opacity="0.9"/>
+  <rect x="100" y="60" width="56"  height="48" rx="14" fill="#FFFFFF"/>
+
+  <!-- "Eye" on the head block -->
+  <circle cx="128" cy="84" r="8" fill="#D97757"/>
 </svg>

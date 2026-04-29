@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Monochrome totem for the menu bar template image.
+       macOS automatically recolors template images for light/dark menu bars. -->
+  <rect x="70" y="188" width="116" height="28" rx="10" fill="#000000" opacity="0.55"/>
+  <rect x="80" y="152" width="96"  height="28" rx="10" fill="#000000" opacity="0.75"/>
+  <rect x="90" y="116" width="76"  height="28" rx="10" fill="#000000" opacity="0.9"/>
+  <rect x="100" y="60" width="56"  height="48" rx="14" fill="#000000"/>
+  <!-- Eye dot: pure black on the template; macOS will tint the whole thing -->
+  <circle cx="128" cy="84" r="12" fill="#000000"/>
+</svg>

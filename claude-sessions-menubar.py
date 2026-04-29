@@ -34,9 +34,21 @@ CONFIG = MANAGER_DIR / "config"
 LOG_FILE = MANAGER_DIR / "logs" / "claude-sessions.log"
 NO_RESTORE_FLAG = MANAGER_DIR / ".no-restore"
 CLI = MANAGER_DIR / "claude-sessions"
+ICON_PATH = MANAGER_DIR / "menubar-icon.png"
 
 REFRESH_SECONDS = 10
 MAX_SESSIONS_IN_MENU = 30
+
+
+def resolve_cli() -> Path:
+    """Prefer Homebrew-installed binary when present; fall back to the
+    self-install path under $MANAGER_DIR."""
+    for candidate in (Path("/opt/homebrew/bin/claude-sessions"),
+                      Path("/usr/local/bin/claude-sessions"),
+                      CLI):
+        if candidate.exists():
+            return candidate
+    return CLI
 
 
 def pid_alive(pid: int) -> bool:
@@ -105,10 +117,11 @@ end tell
 
 
 def run_cli(*args: str) -> None:
-    if not CLI.exists():
-        rumps.alert("claude-sessions", f"CLI not found at {CLI}")
+    cli = resolve_cli()
+    if not cli.exists():
+        rumps.alert("claude-sessions", f"CLI not found at {cli}")
         return
-    subprocess.Popen([str(CLI), *args])
+    subprocess.Popen([str(cli), *args])
 
 
 def open_path(path: Path) -> None:
@@ -117,7 +130,11 @@ def open_path(path: Path) -> None:
 
 class ClaudeSessionsApp(rumps.App):
     def __init__(self) -> None:
-        super().__init__("⎋ 0", quit_button=None)
+        # Use the totem PNG if it's been installed alongside this script;
+        # otherwise fall back to a text-only title. `template=True` makes
+        # macOS auto-tint the image for light/dark menu bars.
+        icon = str(ICON_PATH) if ICON_PATH.exists() else None
+        super().__init__("0", icon=icon, template=True, quit_button=None)
         self._build_menu()
         rumps.Timer(self._refresh, REFRESH_SECONDS).start()
         # First paint
@@ -179,15 +196,15 @@ end tell
         try:
             sessions = read_sessions()
         except Exception as e:
-            self.title = "⎋ ?"
+            self.title = " ?"
             self.status_item.title = f"Error: {e}"
             return
 
         alive = [s for s in sessions if s.get("_alive")]
         dead = [s for s in sessions if not s.get("_alive")]
 
-        # Update icon/title
-        self.title = f"⎋ {len(alive)}"
+        # Update title (the icon is fixed; title holds the count)
+        self.title = f" {len(alive)}"
         status_bits = [f"{len(alive)} live"]
         if dead:
             status_bits.append(f"{len(dead)} stale")

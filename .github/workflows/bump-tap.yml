@@ -1,0 +1,78 @@
+name: Bump Homebrew tap
+
+# Fires when a new version tag is pushed. Opens (or pushes) a formula update
+# in the amer313/homebrew-tap repo pointing at the new tarball + sha256.
+#
+# Requires a TAP_PUSH_TOKEN secret — a PAT with `repo` scope on the tap repo.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag + tarball SHA256
+        id: info
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          TARBALL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          echo "Tag:    $TAG"
+          echo "Version:$VERSION"
+          echo "Tarball:$TARBALL"
+
+          # GitHub can take a moment to make the tag's auto-tarball available.
+          for i in 1 2 3 4 5; do
+            if curl -fsSL -o tarball.tgz "$TARBALL"; then break; fi
+            echo "Tarball not ready yet (attempt $i), sleeping 6s..."
+            sleep 6
+          done
+
+          SHA=$(shasum -a 256 tarball.tgz | awk '{print $1}')
+          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"        >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION">> "$GITHUB_OUTPUT"
+          echo "url=$TARBALL"    >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: amer313/homebrew-tap
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          FORMULA="Formula/claude-sessions.rb"
+          VERSION="${{ steps.info.outputs.version }}"
+          URL="${{ steps.info.outputs.url }}"
+          SHA="${{ steps.info.outputs.sha }}"
+
+          sed -E -i \
+            -e "s|^([[:space:]]*url ).*|\1\"$URL\"|" \
+            -e "s|^([[:space:]]*sha256 ).*|\1\"$SHA\"|" \
+            -e "s|^([[:space:]]*version ).*|\1\"$VERSION\"|" \
+            "$FORMULA"
+
+          echo "----- updated formula -----"
+          cat "$FORMULA"
+
+      - name: Commit + push
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git add Formula/claude-sessions.rb
+          git commit -m "claude-sessions ${{ steps.info.outputs.version }}"
+          git push origin HEAD:main
