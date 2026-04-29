@@ -13,7 +13,8 @@
 #
 # Config (~/.claude/session-manager/config):
 #   CLAUDE_RESUME_FLAGS="--dangerously-skip-permissions"
-#   TERMINAL="iTerm2"  (or "Terminal")
+#   TERMINAL="iTerm2"     (or "Terminal")
+#   LAYOUT="tabs"          (tabs | windows | tmux)
 set -euo pipefail
 
 MANAGER_DIR="$HOME/.claude/session-manager"
@@ -25,11 +26,13 @@ LOG_FILE="$LOG_DIR/claude-sessions.log"
 LAUNCHAGENTS="$HOME/Library/LaunchAgents"
 SNAPSHOT_LABEL="com.claude.session-snapshot"
 RESTORE_LABEL="com.claude.session-restore"
+MENUBAR_LABEL="com.claude.session-menubar"
 NO_RESTORE_FLAG="$MANAGER_DIR/.no-restore"
 
 # Defaults (overridden by config)
 CLAUDE_RESUME_FLAGS=""
 TERMINAL=""
+LAYOUT="tabs"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -151,6 +154,184 @@ PYEOF
     fi
 }
 
+# ─── RESTORE HELPERS ────────────────────────────────────────────────────────
+# Basename of a path, used as a short display name for tabs/windows.
+short_label() {
+    local cwd="$1" name="${2:-}"
+    if [[ -n "$name" ]]; then
+        echo "$name"
+    else
+        basename "$cwd"
+    fi
+}
+
+# Build the `claude --resume` command string for a single session.
+build_resume_cmd() {
+    local session_id="$1" cwd="$2" name="$3"
+    local flags="${CLAUDE_RESUME_FLAGS:+ $CLAUDE_RESUME_FLAGS}"
+    local cmd="cd '${cwd}' && claude${flags} --resume '${session_id}'"
+    if [[ -n "$name" ]]; then
+        cmd="cd '${cwd}' && claude${flags} --resume '${session_id}' --name '${name}'"
+    fi
+    echo "$cmd"
+}
+
+# ─── RESTORE: iTerm2 tabs layout ─────────────────────────────────────────────
+# Opens one iTerm2 window titled "Claude Sessions (N)" and creates one tab
+# per session. Each tab is named by its short label.
+restore_iterm_tabs() {
+    local sessions="$1"
+    local count
+    count=$(echo "$sessions" | wc -l | tr -d ' ')
+
+    # Build one big AppleScript that creates a window and all tabs in sequence.
+    # This is more reliable than one osascript per tab (avoids focus races).
+    local script="tell application \"iTerm2\"
+    activate
+    set newWindow to (create window with default profile)
+    set name of newWindow to \"Claude Sessions ($count)\"
+"
+    local first=true
+    while IFS='|' read -r session_id cwd name pid status; do
+        [[ ! -d "$cwd" ]] && continue
+        local label cmd
+        label=$(short_label "$cwd" "$name")
+        cmd=$(build_resume_cmd "$session_id" "$cwd" "$name")
+        # Escape double quotes and backslashes for AppleScript string literal
+        local esc_cmd="${cmd//\\/\\\\}"
+        esc_cmd="${esc_cmd//\"/\\\"}"
+        local esc_label="${label//\"/\\\"}"
+
+        if $first; then
+            # The newly created window already has one session. Use it.
+            script+="    tell current session of newWindow
+        set name to \"$esc_label\"
+        write text \"$esc_cmd\"
+    end tell
+"
+            first=false
+        else
+            script+="    tell newWindow
+        set newTab to (create tab with default profile)
+        tell current session of newTab
+            set name to \"$esc_label\"
+            write text \"$esc_cmd\"
+        end tell
+    end tell
+"
+        fi
+    done <<< "$sessions"
+    script+="end tell"
+
+    osascript <<< "$script"
+}
+
+# ─── RESTORE: Terminal.app tabs layout ──────────────────────────────────────
+# Opens one Terminal window and uses `do script ... in front window` to get
+# subsequent tabs via keystroke (⌘T). AppleScript tab support in Terminal.app
+# is limited, so we rely on System Events to open new tabs.
+restore_terminal_tabs() {
+    local sessions="$1"
+    local first=true
+    while IFS='|' read -r session_id cwd name pid status; do
+        [[ ! -d "$cwd" ]] && continue
+        local cmd
+        cmd=$(build_resume_cmd "$session_id" "$cwd" "$name")
+        local esc_cmd="${cmd//\"/\\\"}"
+
+        if $first; then
+            osascript <<ASCRIPT
+tell application "Terminal"
+    activate
+    do script "$esc_cmd"
+end tell
+ASCRIPT
+            first=false
+        else
+            # Open a new tab in the frontmost Terminal window via ⌘T, then run the cmd in it.
+            osascript <<ASCRIPT
+tell application "Terminal" to activate
+tell application "System Events" to keystroke "t" using {command down}
+delay 0.3
+tell application "Terminal"
+    do script "$esc_cmd" in front window
+end tell
+ASCRIPT
+        fi
+        sleep 0.4
+    done <<< "$sessions"
+}
+
+# ─── RESTORE: tmux layout ────────────────────────────────────────────────────
+# Creates (or reuses) a tmux session named "claude" with one window per session.
+# After completion, you attach with: tmux attach -t claude
+restore_tmux() {
+    local sessions="$1"
+    if ! command -v tmux &>/dev/null; then
+        log "Restore: tmux not installed, cannot use LAYOUT=tmux"
+        echo -e "${RED}tmux not installed.${NC} brew install tmux, or set LAYOUT=tabs."
+        return 1
+    fi
+
+    # Create session if it doesn't exist
+    if ! tmux has-session -t claude 2>/dev/null; then
+        tmux new-session -d -s claude -n bootstrap
+        local created=true
+    else
+        local created=false
+    fi
+
+    while IFS='|' read -r session_id cwd name pid status; do
+        [[ ! -d "$cwd" ]] && continue
+        local label cmd
+        label=$(short_label "$cwd" "$name")
+        cmd=$(build_resume_cmd "$session_id" "$cwd" "$name")
+        tmux new-window -t claude -n "$label" -c "$cwd" "$cmd"
+    done <<< "$sessions"
+
+    # Clean up the bootstrap window if we created it
+    if $created; then
+        tmux kill-window -t claude:bootstrap 2>/dev/null || true
+    fi
+
+    echo -e "${GREEN}Sessions restored in tmux.${NC} Attach with: tmux attach -t claude"
+}
+
+# ─── RESTORE: legacy one-window-per-session layout ──────────────────────────
+restore_windows_legacy() {
+    local sessions="$1"
+    local terminal="$2"
+    local i=0
+    local count
+    count=$(echo "$sessions" | wc -l | tr -d ' ')
+
+    while IFS='|' read -r session_id cwd name pid status; do
+        i=$((i + 1))
+        [[ ! -d "$cwd" ]] && continue
+        local cmd
+        cmd=$(build_resume_cmd "$session_id" "$cwd" "$name")
+
+        if [[ "$terminal" == "iTerm2" ]]; then
+            osascript <<ASCRIPT
+tell application "iTerm2"
+    activate
+    create window with default profile
+    tell current session of current window
+        write text "$cmd"
+    end tell
+end tell
+ASCRIPT
+        else
+            osascript -e "tell application \"Terminal\"
+    activate
+    do script \"${cmd//\"/\\\"}\"
+end tell"
+        fi
+
+        [[ $i -lt $count ]] && sleep 1
+    done <<< "$sessions"
+}
+
 # ─── RESTORE ─────────────────────────────────────────────────────────────────
 cmd_restore() {
     ensure_dirs
@@ -207,67 +388,40 @@ PYEOF
     count=$(echo "$sessions" | wc -l | tr -d ' ')
     local terminal
     terminal=$(detect_terminal)
+    local layout="${LAYOUT:-tabs}"
 
-    log "Restore: resuming $count session(s) in $terminal (flags: ${CLAUDE_RESUME_FLAGS:-none})"
+    log "Restore: resuming $count session(s) — terminal=$terminal layout=$layout flags=${CLAUDE_RESUME_FLAGS:-none}"
 
+    # Print the list for logs / interactive invocations
     local i=0
     while IFS='|' read -r session_id cwd name pid status; do
         i=$((i + 1))
-
-        if [[ ! -d "$cwd" ]]; then
-            log "Restore: skipping $session_id — $cwd not found"
-            continue
-        fi
-
-        # Build the resume command with configured flags
-        local flags="${CLAUDE_RESUME_FLAGS:+ $CLAUDE_RESUME_FLAGS}"
-        local cmd="cd '${cwd}' && claude${flags} --resume '${session_id}'"
-        if [[ -n "$name" ]]; then
-            cmd="cd '${cwd}' && claude${flags} --resume '${session_id}' --name '${name}'"
-        fi
-
         local display="${name:-${session_id:0:8}...}"
         echo -e "  ${GREEN}[$i/$count]${NC} ${BOLD}$display${NC} ${DIM}$cwd${NC}"
-
-        if [[ "$terminal" == "iTerm2" ]]; then
-            if [[ $i -eq 1 ]]; then
-                osascript <<ASCRIPT
-tell application "iTerm2"
-    activate
-    create window with default profile
-    tell current session of current window
-        write text "$cmd"
-    end tell
-end tell
-ASCRIPT
-            else
-                osascript <<ASCRIPT
-tell application "iTerm2"
-    tell current window
-        create tab with default profile
-        tell current session
-            write text "$cmd"
-        end tell
-    end tell
-end tell
-ASCRIPT
-            fi
-        else
-            osascript -e "tell application \"Terminal\"
-    activate
-    do script \"$cmd\"
-end tell"
-        fi
-
-        [[ $i -lt $count ]] && sleep 1
     done <<< "$sessions"
+
+    case "$layout" in
+        tmux)
+            restore_tmux "$sessions"
+            ;;
+        windows)
+            restore_windows_legacy "$sessions" "$terminal"
+            ;;
+        tabs|*)
+            if [[ "$terminal" == "iTerm2" ]]; then
+                restore_iterm_tabs "$sessions"
+            else
+                restore_terminal_tabs "$sessions"
+            fi
+            ;;
+    esac
 
     [[ -f "$BACKUP" ]] && mv "$BACKUP" "${BACKUP%.json}.restored.json" 2>/dev/null || true
 
-    osascript -e "display notification \"Restored $count Claude session(s) in $terminal\" with title \"Claude Sessions\" sound name \"Glass\"" 2>/dev/null || true
+    osascript -e "display notification \"Restored $count Claude session(s) ($layout)\" with title \"Claude Sessions\" sound name \"Glass\"" 2>/dev/null || true
 
-    log "Restore: $count session(s) resumed"
-    echo -e "\n${GREEN}Restored $count session(s) in $terminal.${NC}"
+    log "Restore: $count session(s) resumed ($layout)"
+    echo -e "\n${GREEN}Restored $count session(s) ($layout).${NC}"
 }
 
 # ─── STATUS ──────────────────────────────────────────────────────────────────
@@ -276,9 +430,10 @@ cmd_status() {
     load_config
     echo ""
 
-    local snap_ok=false rest_ok=false
+    local snap_ok=false rest_ok=false menu_ok=false
     launchctl list "$SNAPSHOT_LABEL" &>/dev/null && snap_ok=true
     launchctl list "$RESTORE_LABEL" &>/dev/null && rest_ok=true
+    launchctl list "$MENUBAR_LABEL" &>/dev/null && menu_ok=true
 
     if $snap_ok && $rest_ok; then
         echo -e "  ${GREEN}●${NC}  Session manager is ${GREEN}active${NC}"
@@ -288,8 +443,13 @@ cmd_status() {
         echo -e "  ${RED}○${NC}  Not installed — run: claude-sessions install"
     fi
 
+    if $menu_ok; then
+        echo -e "  ${GREEN}●${NC}  Menu bar item is ${GREEN}running${NC}"
+    fi
+
     [[ -f "$NO_RESTORE_FLAG" ]] && echo -e "  ${YELLOW}!${NC}  Auto-restore ${YELLOW}disabled${NC}"
     [[ -n "$CLAUDE_RESUME_FLAGS" ]] && echo -e "  ${DIM}   Resume flags: $CLAUDE_RESUME_FLAGS${NC}"
+    echo -e "  ${DIM}   Layout: ${LAYOUT:-tabs}${NC}"
 
     echo ""
 
@@ -345,6 +505,12 @@ CLAUDE_RESUME_FLAGS=""
 
 # Terminal to use: "iTerm2" or "Terminal" (auto-detected if empty)
 TERMINAL=""
+
+# Restore layout:
+#   tabs    — one window with one tab per session (default)
+#   windows — one window per session (old behavior)
+#   tmux    — one tmux session "claude" with one window per session
+LAYOUT="tabs"
 CONF
     fi
 
@@ -428,11 +594,12 @@ PLIST
     echo ""
     echo -e "  ${DIM}CLI: $bin_dir/claude-sessions${NC}"
     echo ""
-    echo "  claude-sessions status     What's running now"
-    echo "  claude-sessions restore    Manually resume dead sessions"
-    echo "  claude-sessions disable    Skip next auto-restore"
-    echo "  claude-sessions enable     Re-enable auto-restore"
-    echo "  claude-sessions uninstall  Remove everything"
+    echo "  claude-sessions status             What's running now"
+    echo "  claude-sessions restore            Manually resume dead sessions"
+    echo "  claude-sessions menubar install    Add menu bar item (optional)"
+    echo "  claude-sessions disable            Skip next auto-restore"
+    echo "  claude-sessions enable             Re-enable auto-restore"
+    echo "  claude-sessions uninstall          Remove everything"
     echo ""
 }
 
@@ -440,8 +607,10 @@ PLIST
 cmd_uninstall() {
     launchctl bootout "gui/$(id -u)/$SNAPSHOT_LABEL" 2>/dev/null || true
     launchctl bootout "gui/$(id -u)/$RESTORE_LABEL" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" 2>/dev/null || true
     rm -f "$LAUNCHAGENTS/$SNAPSHOT_LABEL.plist"
     rm -f "$LAUNCHAGENTS/$RESTORE_LABEL.plist"
+    rm -f "$LAUNCHAGENTS/$MENUBAR_LABEL.plist"
     rm -f "$HOME/.local/bin/claude-sessions"
     echo -e "${GREEN}Uninstalled.${NC} Data preserved in $MANAGER_DIR"
     log "Uninstalled"
@@ -458,6 +627,99 @@ cmd_enable() {
     echo -e "${GREEN}Auto-restore enabled.${NC}"
 }
 
+# ─── MENU BAR ────────────────────────────────────────────────────────────────
+MENUBAR_SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/amer313/claude-sessions/main/claude-sessions-menubar.py"
+
+cmd_menubar() {
+    local sub="${1:-status}"
+    local menubar_py="$MANAGER_DIR/claude-sessions-menubar.py"
+
+    case "$sub" in
+        install)
+            ensure_dirs
+            echo "Setting up menu bar item..."
+
+            # If we already have the script alongside this one in the repo, copy it.
+            # Otherwise, download it.
+            local script_dir
+            script_dir="$(cd "$(dirname "$0")" && pwd)"
+            if [[ -f "$script_dir/claude-sessions-menubar.py" ]]; then
+                cp "$script_dir/claude-sessions-menubar.py" "$menubar_py"
+            else
+                curl -fsSL "$MENUBAR_SCRIPT_URL_DEFAULT" -o "$menubar_py"
+            fi
+            chmod +x "$menubar_py"
+
+            # Ensure rumps is installed for the user
+            if ! /usr/bin/python3 -c "import rumps" 2>/dev/null; then
+                echo "Installing 'rumps' (menu bar library) to user site-packages..."
+                /usr/bin/python3 -m pip install --user --quiet rumps || {
+                    echo -e "${RED}Failed to install rumps.${NC} Try: python3 -m pip install --user rumps"
+                    return 1
+                }
+            fi
+
+            mkdir -p "$LAUNCHAGENTS"
+            cat > "$LAUNCHAGENTS/$MENUBAR_LABEL.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$MENUBAR_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>$menubar_py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$LOG_DIR/menubar-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_DIR/menubar-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+
+            launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" 2>/dev/null || true
+            launchctl bootstrap "gui/$(id -u)" "$LAUNCHAGENTS/$MENUBAR_LABEL.plist"
+            log "Menu bar installed"
+            echo -e "${GREEN}Menu bar item installed.${NC} Look for ⎋ in your menu bar."
+            ;;
+        uninstall)
+            launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" 2>/dev/null || true
+            rm -f "$LAUNCHAGENTS/$MENUBAR_LABEL.plist"
+            log "Menu bar uninstalled"
+            echo -e "${GREEN}Menu bar item removed.${NC}"
+            ;;
+        run)
+            # Run directly in the foreground (for manual testing)
+            if [[ ! -f "$menubar_py" ]]; then
+                echo -e "${RED}Menu bar not installed.${NC} Run: claude-sessions menubar install"
+                return 1
+            fi
+            exec /usr/bin/python3 "$menubar_py"
+            ;;
+        status|*)
+            if launchctl list "$MENUBAR_LABEL" &>/dev/null; then
+                echo -e "${GREEN}Menu bar running.${NC}"
+            else
+                echo -e "${DIM}Menu bar not running.${NC} Install with: claude-sessions menubar install"
+            fi
+            ;;
+    esac
+}
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 case "${1:-status}" in
     snapshot)   cmd_snapshot ;;
@@ -467,16 +729,19 @@ case "${1:-status}" in
     uninstall)  cmd_uninstall ;;
     disable)    cmd_disable ;;
     enable)     cmd_enable ;;
+    menubar)    cmd_menubar "${2:-status}" ;;
     *)
         echo "claude-sessions — Auto-resume Claude Code after Mac restart"
         echo ""
-        echo "  status     Show live/dead sessions and agent status"
-        echo "  restore    Resume all dead-PID sessions now"
-        echo "  snapshot   Back up current session data"
-        echo "  install    Set up LaunchAgents for auto-snapshot + auto-restore"
-        echo "  uninstall  Remove LaunchAgents"
-        echo "  disable    Skip next auto-restore"
-        echo "  enable     Re-enable auto-restore"
+        echo "  status              Show live/dead sessions and agent status"
+        echo "  restore             Resume all dead-PID sessions now"
+        echo "  snapshot            Back up current session data"
+        echo "  install             Set up LaunchAgents for auto-snapshot + auto-restore"
+        echo "  uninstall           Remove LaunchAgents"
+        echo "  disable             Skip next auto-restore"
+        echo "  enable              Re-enable auto-restore"
+        echo "  menubar install     Add menu bar status item (opt-in)"
+        echo "  menubar uninstall   Remove menu bar status item"
         exit 1
         ;;
 esac
