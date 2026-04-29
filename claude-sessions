@@ -601,8 +601,23 @@ cmd_status() {
 # ─── INSTALL ─────────────────────────────────────────────────────────────────
 cmd_install() {
     ensure_dirs
-    local script_path="$MANAGER_DIR/claude-sessions"
-    chmod +x "$script_path"
+
+    # Resolve the script path that LaunchAgents should point to.
+    # If we're running under Homebrew (/opt/homebrew or /usr/local/Cellar),
+    # use that absolute path directly — brew will keep it up to date via
+    # `brew upgrade`. Otherwise (curl install), copy ourselves into
+    # $MANAGER_DIR so upgrades happen by re-running install.sh.
+    local self_path script_path
+    self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    if [[ "$self_path" == /opt/homebrew/* || "$self_path" == /usr/local/Cellar/* || "$self_path" == /usr/local/opt/* ]]; then
+        script_path="$self_path"
+    else
+        script_path="$MANAGER_DIR/claude-sessions"
+        if [[ "$self_path" != "$script_path" ]]; then
+            cp "$self_path" "$script_path"
+        fi
+        chmod +x "$script_path"
+    fi
 
     # Create default config if it doesn't exist
     if [[ ! -f "$CONFIG" ]]; then
@@ -693,11 +708,17 @@ PLIST
     launchctl bootstrap "gui/$(id -u)" "$LAUNCHAGENTS/$SNAPSHOT_LABEL.plist"
     launchctl bootstrap "gui/$(id -u)" "$LAUNCHAGENTS/$RESTORE_LABEL.plist"
 
-    local bin_dir="$HOME/.local/bin"
-    mkdir -p "$bin_dir"
-    ln -sf "$script_path" "$bin_dir/claude-sessions"
+    # For non-brew (curl) installs, drop a symlink into ~/.local/bin
+    # so `claude-sessions` resolves on PATH.
+    local cli_path="$script_path"
+    if [[ "$script_path" != /opt/homebrew/* && "$script_path" != /usr/local/Cellar/* && "$script_path" != /usr/local/opt/* ]]; then
+        local bin_dir="$HOME/.local/bin"
+        mkdir -p "$bin_dir"
+        ln -sf "$script_path" "$bin_dir/claude-sessions"
+        cli_path="$bin_dir/claude-sessions"
+    fi
 
-    log "Installed LaunchAgents and symlink"
+    log "Installed LaunchAgents (script: $script_path)"
 
     echo -e "${GREEN}Installed.${NC}"
     echo ""
@@ -705,7 +726,7 @@ PLIST
     echo "  Restore agent:   resumes sessions 10s after login"
     echo "  Config:          $CONFIG"
     echo ""
-    echo -e "  ${DIM}CLI: $bin_dir/claude-sessions${NC}"
+    echo -e "  ${DIM}CLI: $cli_path${NC}"
     echo ""
     echo "  claude-sessions status             What's running now"
     echo "  claude-sessions restore            Manually resume dead sessions"
@@ -724,8 +745,12 @@ cmd_uninstall() {
     rm -f "$LAUNCHAGENTS/$SNAPSHOT_LABEL.plist"
     rm -f "$LAUNCHAGENTS/$RESTORE_LABEL.plist"
     rm -f "$LAUNCHAGENTS/$MENUBAR_LABEL.plist"
-    rm -f "$HOME/.local/bin/claude-sessions"
+    # Only clean up the curl-install symlink; leave brew-managed binaries alone.
+    if [[ -L "$HOME/.local/bin/claude-sessions" ]]; then
+        rm -f "$HOME/.local/bin/claude-sessions"
+    fi
     echo -e "${GREEN}Uninstalled.${NC} Data preserved in $MANAGER_DIR"
+    echo -e "  ${DIM}If installed via Homebrew: brew uninstall claude-sessions${NC}"
     log "Uninstalled"
 }
 

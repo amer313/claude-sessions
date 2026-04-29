@@ -14,11 +14,22 @@ A lightweight backup daemon (every 5 min) keeps a safety-net copy in case the se
 
 ## Install
 
+### Homebrew (recommended)
+
+```bash
+brew install amer313/tap/claude-sessions
+claude-sessions install
+```
+
+To upgrade: `brew upgrade claude-sessions`.
+
+### curl
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amer313/claude-sessions/main/install.sh | bash
 ```
 
-Or manually:
+### Manual
 
 ```bash
 mkdir -p ~/.claude/session-manager
