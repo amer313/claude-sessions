@@ -33,6 +33,7 @@ NO_RESTORE_FLAG="$MANAGER_DIR/.no-restore"
 CLAUDE_RESUME_FLAGS=""
 TERMINAL=""
 LAYOUT="tabs"
+PRUNE_DAYS=7
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -116,14 +117,20 @@ PYEOF
 # ─── SNAPSHOT ────────────────────────────────────────────────────────────────
 cmd_snapshot() {
     ensure_dirs
+    load_config
     if [[ ! -d "$SESSIONS_DIR" ]]; then return 0; fi
 
-    local count
-    count=$(/usr/bin/python3 - "$SESSIONS_DIR" "$BACKUP" <<'PYEOF'
-import json, os, sys, glob
+    local result
+    result=$(/usr/bin/python3 - "$SESSIONS_DIR" "$BACKUP" "${PRUNE_DAYS:-7}" <<'PYEOF'
+import json, os, sys, glob, time
 
-sessions_dir, backup_path = sys.argv[1], sys.argv[2]
+sessions_dir, backup_path, prune_days_s = sys.argv[1], sys.argv[2], sys.argv[3]
+prune_days = int(prune_days_s)
+now = time.time()
+threshold = now - prune_days * 86400 if prune_days > 0 else 0
+
 active = []
+pruned = 0
 
 for path in sorted(glob.glob(os.path.join(sessions_dir, "*.json"))):
     try:
@@ -133,11 +140,35 @@ for path in sorted(glob.glob(os.path.join(sessions_dir, "*.json"))):
         continue
     if s.get("kind") != "interactive" or s.get("entrypoint") != "cli":
         continue
+
+    # Is this session's PID alive?
+    alive = False
     try:
         os.kill(s["pid"], 0)
-        active.append(s)
+        alive = True
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+    if alive:
+        active.append(s)
+        continue
+
+    # Dead PID — consider pruning. Prune if:
+    #   - the CWD no longer exists, OR
+    #   - the session file is older than PRUNE_DAYS
+    if prune_days > 0:
+        cwd_gone = not os.path.isdir(s.get("cwd", ""))
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = now  # if stat fails, don't prune on age
+        too_old = mtime < threshold
+        if cwd_gone or too_old:
+            try:
+                os.remove(path)
+                pruned += 1
+            except OSError:
+                pass
 
 if active:
     with open(backup_path, "w") as f:
@@ -146,12 +177,89 @@ if active:
 # This prevents the race where snapshot fires at login and nukes
 # the backup before restore can read it.
 
-print(len(active))
+print(f"{len(active)} {pruned}")
 PYEOF
     )
+    local count pruned
+    count=$(echo "$result" | awk '{print $1}')
+    pruned=$(echo "$result" | awk '{print $2}')
     if [[ "${count:-0}" -gt 0 ]]; then
         log "Snapshot: $count active session(s) backed up"
     fi
+    if [[ "${pruned:-0}" -gt 0 ]]; then
+        log "Prune: removed $pruned stale session file(s)"
+    fi
+}
+
+# ─── PRUNE ───────────────────────────────────────────────────────────────────
+# Manual prune command. Same logic as the snapshot path, but surfaces detail
+# about what was dropped.
+cmd_prune() {
+    ensure_dirs
+    load_config
+    local days="${1:-${PRUNE_DAYS:-7}}"
+
+    if [[ ! -d "$SESSIONS_DIR" ]]; then
+        echo "No sessions directory found."
+        return 0
+    fi
+
+    /usr/bin/python3 - "$SESSIONS_DIR" "$days" <<'PYEOF'
+import json, os, sys, glob, time
+
+sessions_dir, days_s = sys.argv[1], sys.argv[2]
+days = int(days_s)
+now = time.time()
+threshold = now - days * 86400
+
+removed = []
+kept_alive = 0
+kept_recent = 0
+
+for path in sorted(glob.glob(os.path.join(sessions_dir, "*.json"))):
+    try:
+        with open(path) as f:
+            s = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        continue
+    if s.get("kind") != "interactive" or s.get("entrypoint") != "cli":
+        continue
+
+    alive = False
+    try:
+        os.kill(s["pid"], 0)
+        alive = True
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    if alive:
+        kept_alive += 1
+        continue
+
+    cwd = s.get("cwd", "")
+    cwd_gone = not os.path.isdir(cwd)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = now
+    too_old = mtime < threshold
+
+    if cwd_gone or too_old:
+        try:
+            os.remove(path)
+            reason = "cwd missing" if cwd_gone else f"{int((now-mtime)/86400)}d old"
+            removed.append((s.get("sessionId", "?")[:8], cwd, reason))
+        except OSError as e:
+            print(f"  failed to remove {path}: {e}")
+    else:
+        kept_recent += 1
+
+print(f"Alive:   {kept_alive}")
+print(f"Kept:    {kept_recent} (dead but <{days}d old and cwd exists)")
+print(f"Removed: {len(removed)}")
+for sid, cwd, reason in removed:
+    print(f"   - {sid}  {reason:>12}  {cwd}")
+PYEOF
 }
 
 # ─── RESTORE HELPERS ────────────────────────────────────────────────────────
@@ -511,6 +619,11 @@ TERMINAL=""
 #   windows — one window per session (old behavior)
 #   tmux    — one tmux session "claude" with one window per session
 LAYOUT="tabs"
+
+# Auto-prune dead sessions older than N days whose CWD still exists,
+# and any dead session whose CWD has been deleted. Runs with the snapshot
+# daemon every 5min. Set to 0 to disable.
+PRUNE_DAYS=7
 CONF
     fi
 
@@ -785,6 +898,7 @@ PLIST
 case "${1:-status}" in
     snapshot)   cmd_snapshot ;;
     restore)    cmd_restore "${2:-0}" ;;
+    prune)      cmd_prune "${2:-}" ;;
     status)     cmd_status ;;
     install)    cmd_install ;;
     uninstall)  cmd_uninstall ;;
@@ -797,6 +911,7 @@ case "${1:-status}" in
         echo "  status              Show live/dead sessions and agent status"
         echo "  restore             Resume all dead-PID sessions now"
         echo "  snapshot            Back up current session data"
+        echo "  prune [days]        Remove dead session files older than N days (default 7)"
         echo "  install             Set up LaunchAgents for auto-snapshot + auto-restore"
         echo "  uninstall           Remove LaunchAgents"
         echo "  disable             Skip next auto-restore"
