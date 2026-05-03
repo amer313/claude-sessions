@@ -14,7 +14,7 @@
 # Config (~/.claude/session-manager/config):
 #   CLAUDE_RESUME_FLAGS="--dangerously-skip-permissions"
 #   TERMINAL="iTerm2"     (or "Terminal")
-#   LAYOUT="tabs"          (tabs | windows | tmux)
+#   LAYOUT="windows"       (windows | tabs | tmux)
 set -euo pipefail
 
 MANAGER_DIR="$HOME/.claude/session-manager"
@@ -32,7 +32,7 @@ NO_RESTORE_FLAG="$MANAGER_DIR/.no-restore"
 # Defaults (overridden by config)
 CLAUDE_RESUME_FLAGS=""
 TERMINAL=""
-LAYOUT="tabs"
+LAYOUT="windows"
 PRUNE_DAYS=7
 
 RED='\033[0;31m'
@@ -377,7 +377,7 @@ restore_tmux() {
     local sessions="$1"
     if ! command -v tmux &>/dev/null; then
         log "Restore: tmux not installed, cannot use LAYOUT=tmux"
-        echo -e "${RED}tmux not installed.${NC} brew install tmux, or set LAYOUT=tabs."
+        echo -e "${RED}tmux not installed.${NC} brew install tmux, or set LAYOUT=windows."
         return 1
     fi
 
@@ -496,7 +496,7 @@ PYEOF
     count=$(echo "$sessions" | wc -l | tr -d ' ')
     local terminal
     terminal=$(detect_terminal)
-    local layout="${LAYOUT:-tabs}"
+    local layout="${LAYOUT:-windows}"
 
     log "Restore: resuming $count session(s) — terminal=$terminal layout=$layout flags=${CLAUDE_RESUME_FLAGS:-none}"
 
@@ -557,7 +557,7 @@ cmd_status() {
 
     [[ -f "$NO_RESTORE_FLAG" ]] && echo -e "  ${YELLOW}!${NC}  Auto-restore ${YELLOW}disabled${NC}"
     [[ -n "$CLAUDE_RESUME_FLAGS" ]] && echo -e "  ${DIM}   Resume flags: $CLAUDE_RESUME_FLAGS${NC}"
-    echo -e "  ${DIM}   Layout: ${LAYOUT:-tabs}${NC}"
+    echo -e "  ${DIM}   Layout: ${LAYOUT:-windows}${NC}"
 
     echo ""
 
@@ -630,10 +630,10 @@ CLAUDE_RESUME_FLAGS=""
 TERMINAL=""
 
 # Restore layout:
-#   tabs    — one window with one tab per session (default)
-#   windows — one window per session (old behavior)
+#   windows — one window per session (default; no extra permissions needed)
+#   tabs    — one window with one tab per session (requires Accessibility permission for Terminal)
 #   tmux    — one tmux session "claude" with one window per session
-LAYOUT="tabs"
+LAYOUT="windows"
 
 # Auto-prune dead sessions older than N days whose CWD still exists,
 # and any dead session whose CWD has been deleted. Runs with the snapshot

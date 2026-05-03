@@ -14,14 +14,14 @@
 Auto-resume all your Claude Code sessions after a Mac restart.
 
 - 🔁 Every open `claude` CLI session is resumed automatically on login
-- 🪟 Opens as named tabs inside a single terminal window (not 20 scattered ones)
+- 🪟 Opens each session in its own terminal window (or tabs / tmux — configurable)
 - 📋 Optional menu bar item with live session count and one-click focus
 - 🧹 Auto-prunes dead session files (missing CWD or older than N days)
 - 📦 Homebrew tap — one command install, `brew upgrade` to update
 
 ## How it works
 
-Claude Code tracks live sessions in `~/.claude/sessions/<PID>.json`. These files survive a restart, but the processes die. On login, this tool reads those files, finds dead PIDs, and resumes each one with `claude --resume <session-id>` — by default, as named tabs inside a single terminal window instead of N separate windows.
+Claude Code tracks live sessions in `~/.claude/sessions/<PID>.json`. These files survive a restart, but the processes die. On login, this tool reads those files, finds dead PIDs, and resumes each one with `claude --resume <session-id>` — by default, in its own terminal window per session. Switch to `tabs` or `tmux` layouts via config.
 
 A lightweight backup daemon (every 5 min) keeps a safety-net copy in case the session files get cleaned up before restore runs. The same daemon prunes stale entries so nothing piles up.
 
@@ -98,10 +98,10 @@ CLAUDE_RESUME_FLAGS="--dangerously-skip-permissions"
 TERMINAL=""
 
 # Restore layout:
-#   tabs    — one window with one tab per session (default)
-#   windows — one window per session (old behavior)
+#   windows — one window per session (default; no extra permissions needed)
+#   tabs    — one window with one tab per session (requires Accessibility permission for Terminal)
 #   tmux    — one tmux session "claude" with one window per session
-LAYOUT="tabs"
+LAYOUT="windows"
 
 # Auto-prune dead session files older than N days (snapshot daemon does this).
 # Also always prunes dead sessions whose CWD no longer exists. Set 0 to disable.
@@ -110,9 +110,9 @@ PRUNE_DAYS=7
 
 ### Layouts
 
-**`tabs` (default)** — One window titled `Claude Sessions (N)` with one named tab per session. Tab names use the session name, or the CWD basename if unnamed. Keeps your desktop clean with many sessions.
+**`windows` (default)** — One new terminal window per session. Works out of the box with no extra macOS permissions.
 
-**`windows`** — Legacy behavior: one new terminal window per session. Useful if you prefer spatial separation over tabs.
+**`tabs`** — One window titled `Claude Sessions (N)` with one named tab per session. Tab names use the session name, or the CWD basename if unnamed. Keeps your desktop clean with many sessions. Requires granting Terminal Accessibility permission (System Settings → Privacy & Security → Accessibility), because opening new tabs relies on a ⌘T keystroke via System Events.
 
 **`tmux`** — Creates (or reuses) a tmux session named `claude` with one window per Claude session. Attach with `tmux attach -t claude`. Best for power users comfortable with tmux. Requires `tmux` on `$PATH`.
 
@@ -130,8 +130,8 @@ The snapshot daemon (runs every 5 min) automatically drops stale session files:
 1. Mac restarts, all Claude processes die
 2. You log in
 3. 10 seconds later, the restore agent reads the backup / session files
-4. Opens a single terminal window with one tab per dead session (default layout)
-5. Each tab runs `claude --resume <session-id>` in the original directory
+4. Opens one terminal window per dead session (default layout)
+5. Each window runs `claude --resume <session-id>` in the original directory
 6. macOS notification confirms how many were restored
 
 ## Requirements
