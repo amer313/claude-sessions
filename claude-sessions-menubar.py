@@ -26,6 +26,17 @@ except ImportError:
     print("rumps is not installed. Run: python3 -m pip install --user rumps", file=sys.stderr)
     sys.exit(1)
 
+# Hide from the Dock — we're a menu bar accessory, not a regular GUI app.
+# Without this, macOS gives every NSApplication a Dock icon (the default
+# rocket-and-snake Python icon), which clutters the user's Dock.
+try:
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory
+    )
+except Exception:
+    pass
+
 HOME = Path.home()
 MANAGER_DIR = HOME / ".claude" / "session-manager"
 SESSIONS_DIR = HOME / ".claude" / "sessions"
