@@ -32,6 +32,8 @@ NO_RESTORE_FLAG="$MANAGER_DIR/.no-restore"
 # Defaults (overridden by config)
 CLAUDE_RESUME_FLAGS=""
 TERMINAL=""
+# "windows" (.command files) is the only layout that needs no Automation or
+# Accessibility permission — it must stay the default.
 LAYOUT="windows"
 PRUNE_DAYS=7
 
@@ -66,11 +68,25 @@ detect_terminal() {
         echo "$TERMINAL"
         return
     fi
-    if [[ -d "/Applications/iTerm.app" ]]; then
+    # Prefer the terminal that is actually RUNNING, not merely installed —
+    # an iTerm.app sitting unused on disk must not steal the restore.
+    if pgrep -xq iTerm2 2>/dev/null; then
         echo "iTerm2"
     else
         echo "Terminal"
     fi
+}
+
+# Absolute path to the claude binary. The LaunchAgent PATH does not include
+# ~/.local/bin (where the native installer puts it), and .command files run
+# in a non-login shell, so `claude` bare is not resolvable in either context.
+resolve_claude_bin() {
+    local c
+    for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" \
+             /opt/homebrew/bin/claude /usr/local/bin/claude; do
+        [[ -x "$c" ]] && { echo "$c"; return; }
+    done
+    command -v claude 2>/dev/null || echo "claude"
 }
 
 # Read all session files from ~/.claude/sessions/ and output pipe-delimited lines.
@@ -405,38 +421,67 @@ restore_tmux() {
     echo -e "${GREEN}Sessions restored in tmux.${NC} Attach with: tmux attach -t claude"
 }
 
-# ─── RESTORE: legacy one-window-per-session layout ──────────────────────────
-restore_windows_legacy() {
-    local sessions="$1"
-    local terminal="$2"
+# ─── RESTORE: one window per session via .command files ─────────────────────
+# Writes one executable .command file per session and opens it with the
+# terminal app. `open -a` needs no Automation or Accessibility permission,
+# and nothing is interpolated into AppleScript, so a session name with odd
+# characters can never abort the restore (which is exactly what happened on
+# 2026-08-16: one unescaped name -> AppleScript syntax error -> set -e killed
+# the loop and the remaining sessions were never resumed).
+#
+# Sets RESTORE_OK / RESTORE_FAILED for the caller. Never aborts on a single
+# bad session — every failure is logged with its session id.
+RESTORE_OK=0
+RESTORE_FAILED=0
+restore_command_files() {
+    local sessions="$1" terminal="$2"
+    local app="Terminal"
+    [[ "$terminal" == "iTerm2" ]] && app="iTerm"
+
+    local claude_bin
+    claude_bin=$(resolve_claude_bin)
+
+    local dir="$MANAGER_DIR/resume"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+
     local i=0
-    local count
-    count=$(echo "$sessions" | wc -l | tr -d ' ')
-
+    RESTORE_OK=0
+    RESTORE_FAILED=0
     while IFS='|' read -r session_id cwd name pid status; do
-        i=$((i + 1))
-        [[ ! -d "$cwd" ]] && continue
-        local cmd
-        cmd=$(build_resume_cmd "$session_id" "$cwd" "$name")
-
-        if [[ "$terminal" == "iTerm2" ]]; then
-            osascript <<ASCRIPT
-tell application "iTerm2"
-    activate
-    create window with default profile
-    tell current session of current window
-        write text "$cmd"
-    end tell
-end tell
-ASCRIPT
-        else
-            osascript -e "tell application \"Terminal\"
-    activate
-    do script \"${cmd//\"/\\\"}\"
-end tell"
+        [[ -z "$session_id" ]] && continue
+        if [[ ! -d "$cwd" ]]; then
+            log "Restore: FAILED $session_id — cwd no longer exists: $cwd"
+            RESTORE_FAILED=$((RESTORE_FAILED + 1))
+            continue
         fi
+        i=$((i + 1))
 
-        [[ $i -lt $count ]] && sleep 1
+        local label safe file
+        label=$(short_label "$cwd" "$name")
+        safe=$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-40)
+        file="$dir/$(printf '%02d' "$i")-${safe}.command"
+
+        {
+            printf '#!/bin/zsh\n'
+            printf 'cd %q || { echo "cwd gone: %s"; exec zsh; }\n' "$cwd" "$cwd"
+            if [[ -n "$name" ]]; then
+                printf 'exec %q %s --resume %q --name %q\n' \
+                    "$claude_bin" "${CLAUDE_RESUME_FLAGS}" "$session_id" "$name"
+            else
+                printf 'exec %q %s --resume %q\n' \
+                    "$claude_bin" "${CLAUDE_RESUME_FLAGS}" "$session_id"
+            fi
+        } > "$file"
+        chmod +x "$file"
+
+        if open -a "$app" "$file" 2>>"$LOG_FILE"; then
+            RESTORE_OK=$((RESTORE_OK + 1))
+        else
+            RESTORE_FAILED=$((RESTORE_FAILED + 1))
+            log "Restore: FAILED to open terminal window for $session_id ($label)"
+        fi
+        sleep 0.5
     done <<< "$sessions"
 }
 
@@ -487,6 +532,18 @@ PYEOF
         sessions=$(read_session_files "dead")
     fi
 
+    # Never resume a session that is already running (matched by sessionId —
+    # the PID in the manifest goes stale the moment a session is resumed),
+    # and never resume the same sessionId twice.
+    if [[ -n "$sessions" ]]; then
+        local alive_sids
+        alive_sids=$(read_session_files "alive" | cut -d'|' -f1)
+        sessions=$(awk -F'|' -v alive="$alive_sids" '
+            BEGIN { n = split(alive, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") seen[a[i]] = 1 }
+            $1 != "" && !seen[$1]++ { print }
+        ' <<< "$sessions")
+    fi
+
     if [[ -z "$sessions" ]]; then
         log "Restore: nothing to restore"
         return 0
@@ -496,7 +553,7 @@ PYEOF
     count=$(echo "$sessions" | wc -l | tr -d ' ')
     local terminal
     terminal=$(detect_terminal)
-    local layout="${LAYOUT:-windows}"
+    local layout="${LAYOUT:-tabs}"
 
     log "Restore: resuming $count session(s) — terminal=$terminal layout=$layout flags=${CLAUDE_RESUME_FLAGS:-none}"
 
@@ -511,25 +568,37 @@ PYEOF
     case "$layout" in
         tmux)
             restore_tmux "$sessions"
+            RESTORE_OK=$count
             ;;
-        windows)
-            restore_windows_legacy "$sessions" "$terminal"
-            ;;
-        tabs|*)
+        tabs)
+            # AppleScript tabs need Automation/Accessibility permissions and
+            # are the least reliable path; kept for explicit opt-in only.
             if [[ "$terminal" == "iTerm2" ]]; then
                 restore_iterm_tabs "$sessions"
             else
                 restore_terminal_tabs "$sessions"
             fi
+            RESTORE_OK=$count
+            ;;
+        windows|*)
+            restore_command_files "$sessions" "$terminal"
             ;;
     esac
 
-    [[ -f "$BACKUP" ]] && mv "$BACKUP" "${BACKUP%.json}.restored.json" 2>/dev/null || true
+    # Only consume the manifest once something actually restored — a total
+    # failure must leave the backup intact for a manual `claude-sessions restore`.
+    if [[ "$RESTORE_OK" -gt 0 && -f "$BACKUP" ]]; then
+        mv "$BACKUP" "${BACKUP%.json}.restored.json" 2>/dev/null || true
+    fi
 
-    osascript -e "display notification \"Restored $count Claude session(s) ($layout)\" with title \"Claude Sessions\" sound name \"Glass\"" 2>/dev/null || true
+    local msg="Restored $RESTORE_OK/$count Claude session(s) ($layout)"
+    [[ "$RESTORE_FAILED" -gt 0 ]] && msg="$msg — $RESTORE_FAILED FAILED, see log"
+    osascript -e "display notification \"$msg\" with title \"Claude Sessions\" sound name \"Glass\"" 2>/dev/null || true
 
-    log "Restore: $count session(s) resumed ($layout)"
-    echo -e "\n${GREEN}Restored $count session(s) ($layout).${NC}"
+    log "Restore: $RESTORE_OK/$count resumed, $RESTORE_FAILED failed ($layout)"
+    echo -e "\n${GREEN}Restored $RESTORE_OK/$count session(s) ($layout).${NC}"
+    [[ "$RESTORE_FAILED" -gt 0 ]] && echo -e "${RED}$RESTORE_FAILED failed — see $LOG_FILE${NC}"
+    return 0
 }
 
 # ─── STATUS ──────────────────────────────────────────────────────────────────
@@ -557,7 +626,7 @@ cmd_status() {
 
     [[ -f "$NO_RESTORE_FLAG" ]] && echo -e "  ${YELLOW}!${NC}  Auto-restore ${YELLOW}disabled${NC}"
     [[ -n "$CLAUDE_RESUME_FLAGS" ]] && echo -e "  ${DIM}   Resume flags: $CLAUDE_RESUME_FLAGS${NC}"
-    echo -e "  ${DIM}   Layout: ${LAYOUT:-windows}${NC}"
+    echo -e "  ${DIM}   Layout: ${LAYOUT:-tabs}${NC}"
 
     echo ""
 
@@ -630,10 +699,10 @@ CLAUDE_RESUME_FLAGS=""
 TERMINAL=""
 
 # Restore layout:
-#   windows — one window per session (default; no extra permissions needed)
-#   tabs    — one window with one tab per session (requires Accessibility permission for Terminal)
+#   tabs    — one window with one tab per session (default)
+#   windows — one window per session (old behavior)
 #   tmux    — one tmux session "claude" with one window per session
-LAYOUT="windows"
+LAYOUT="tabs"
 
 # Auto-prune dead sessions older than N days whose CWD still exists,
 # and any dead session whose CWD has been deleted. Runs with the snapshot
@@ -656,6 +725,8 @@ CONF
         <string>$script_path</string>
         <string>snapshot</string>
     </array>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StartInterval</key>
     <integer>300</integer>
     <key>StandardOutPath</key>
@@ -665,7 +736,7 @@ CONF
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin</string>
+        <string>$HOME/.local/bin:/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin</string>
         <key>HOME</key>
         <string>$HOME</string>
     </dict>
@@ -695,7 +766,7 @@ PLIST
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin</string>
+        <string>$HOME/.local/bin:/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin</string>
         <key>HOME</key>
         <string>$HOME</string>
     </dict>
@@ -894,7 +965,7 @@ cmd_menubar() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin</string>
+        <string>$HOME/.local/bin:/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin</string>
         <key>HOME</key>
         <string>$HOME</string>
     </dict>

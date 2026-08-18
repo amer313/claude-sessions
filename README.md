@@ -136,7 +136,7 @@ The snapshot daemon (runs every 5 min) automatically drops stale session files:
 
 ## Requirements
 
-- macOS (uses LaunchAgents + AppleScript)
+- macOS (uses LaunchAgents; AppleScript only for the optional `tabs` layout)
 - Python 3 (ships with macOS; menu bar needs Python 3.10+ — handled automatically via venv)
 - Claude Code CLI on `$PATH`
 - `tmux` — only if you set `LAYOUT=tmux`
