@@ -466,12 +466,19 @@ restore_command_files() {
             printf '#!/bin/zsh\n'
             printf 'cd %q || { echo "cwd gone: %s"; exec zsh; }\n' "$cwd" "$cwd"
             if [[ -n "$name" ]]; then
-                printf 'exec %q %s --resume %q --name %q\n' \
+                printf '%q %s --resume %q --name %q\n' \
                     "$claude_bin" "${CLAUDE_RESUME_FLAGS}" "$session_id" "$name"
             else
-                printf 'exec %q %s --resume %q\n' \
+                printf '%q %s --resume %q\n' \
                     "$claude_bin" "${CLAUDE_RESUME_FLAGS}" "$session_id"
             fi
+            # A failed resume must stay on screen, not vanish with the window.
+            printf 'rc=$?\n'
+            printf 'if [[ $rc -ne 0 ]]; then\n'
+            printf '  echo; echo "✗ claude --resume failed (exit $rc) for session %s"\n' "$session_id"
+            printf '  echo "  pick it manually:  claude --resume"\n'
+            printf '  exec zsh -i\n'
+            printf 'fi\n'
         } > "$file"
         chmod +x "$file"
 
@@ -499,6 +506,20 @@ cmd_restore() {
     if [[ "$delay" -gt 0 ]]; then
         log "Restore: waiting ${delay}s for system to settle..."
         sleep "$delay"
+    fi
+
+    # Self-heal the snapshot agent. On 2026-08-16 it was found silently
+    # unloaded (cause unknown) and the manifest went hours stale. Restore
+    # runs at every login, so re-bootstrap it here if launchd lost it —
+    # a stale manifest restores the WRONG session set, which is worse
+    # than restoring none.
+    if [[ -f "$LAUNCHAGENTS/$SNAPSHOT_LABEL.plist" ]] && ! launchctl list "$SNAPSHOT_LABEL" &>/dev/null; then
+        if launchctl bootstrap "gui/$(id -u)" "$LAUNCHAGENTS/$SNAPSHOT_LABEL.plist" 2>>"$LOG_FILE"; then
+            log "Restore: snapshot agent was NOT loaded — re-bootstrapped it"
+        else
+            log "Restore: snapshot agent NOT loaded and re-bootstrap FAILED — run: claude-sessions install"
+            osascript -e "display notification \"Snapshot agent is DOWN and could not be re-bootstrapped — run: claude-sessions install\" with title \"Claude Sessions\"" 2>/dev/null || true
+        fi
     fi
 
     # Primary source: backup manifest (created while sessions were alive, survives restart)
